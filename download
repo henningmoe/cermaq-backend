@@ -1,0 +1,16 @@
+# Copy this to .env for local development
+# On Railway: set these as environment variables in the dashboard
+
+# API-nøkkel for å beskytte endepunktene (lag en lang tilfeldig streng)
+# Eksempel: openssl rand -hex 32
+API_KEY=bytt-meg-ut-med-en-lang-tilfeldig-streng
+
+# ScaleAQ credentials
+SCALEAQ_USERNAME=din@epost.no
+SCALEAQ_PASSWORD=ditt_passord
+
+# Database path (Railway persistent volume)
+DB_PATH=/data/cermaq.db
+
+# How many days back to fetch on each sync (default: 2)
+SYNC_LOOKBACK_DAYS=2

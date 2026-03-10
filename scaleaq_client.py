@@ -50,7 +50,7 @@ class ScaleAQClient:
 
         # ScaleAQ returns { access_token, expires_in, token_type }
         self._token        = data["access_token"]
-        expires_in         = data.get("expires_in", 3600)
+        expires_in         = int(data.get("expires_in", 3600))
         self._token_expiry = time.time() + expires_in
         logger.info(f"Token acquired, expires in {expires_in}s")
         return self._token
