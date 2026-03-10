@@ -75,7 +75,7 @@ def parse_aggregate_rows(raw_items: list[dict]) -> list[dict]:
                 "unit_id":    unit_id,
                 "bucket_time": item.get("time", ""),
                 "data_type":  item["dataType"],
-                "value":      item.get("value", 0.0),
+                "value":      float(item.get("value") or 0),
             })
 
         # Shape 2: buckets list
@@ -86,13 +86,13 @@ def parse_aggregate_rows(raw_items: list[dict]) -> list[dict]:
                     "unit_id":    unit_id,
                     "bucket_time": t,
                     "data_type":  "FeedAmount",
-                    "value":      b.get("FeedAmount", 0.0),
+                    "value":      float(b.get("FeedAmount") or 0),
                 })
                 rows.append({
                     "unit_id":    unit_id,
                     "bucket_time": t,
                     "data_type":  "Intensity",
-                    "value":      b.get("Intensity", 0.0),
+                    "value":      float(b.get("Intensity") or 0),
                 })
 
         # Shape 3: already combined per bucket
@@ -101,13 +101,13 @@ def parse_aggregate_rows(raw_items: list[dict]) -> list[dict]:
                 "unit_id":    unit_id,
                 "bucket_time": item.get("time", ""),
                 "data_type":  "FeedAmount",
-                "value":      item.get("FeedAmount", item.get("feedAmount", 0.0)),
+                "value":      float(item.get("FeedAmount") or item.get("feedAmount") or 0),
             })
             rows.append({
                 "unit_id":    unit_id,
                 "bucket_time": item.get("time", ""),
                 "data_type":  "Intensity",
-                "value":      item.get("Intensity", item.get("intensity", 0.0)),
+                "value":      float(item.get("Intensity") or item.get("intensity") or 0),
             })
 
     return rows
