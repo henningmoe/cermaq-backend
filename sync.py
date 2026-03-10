@@ -30,38 +30,37 @@ async def get_unit_ids(db: aiosqlite.Connection) -> list[str]:
 
 
 def parse_aggregate_rows(raw_items: list[dict]) -> list[dict]:
+    """
+    ScaleAQ nested structure:
+    [ { siteId, items: [ { unitId, items: [ { type, items: [ { dateTime, averageValue, measurement } ] } ] } ] } ]
+    """
     rows = []
-    for item in raw_items:
-        unit_id = str(item.get("unitId") or item.get("unit_id") or "")
-        if not unit_id:
-            logger.warning(f"Skipping item with no unitId: {list(item.keys())}")
-            continue
 
-        # Shape 1: flat rows per dataType
-        if "dataType" in item:
-            rows.append({
-                "unit_id":     unit_id,
-                "bucket_time": item.get("time", ""),
-                "data_type":   item["dataType"],
-                "value":       float(item.get("value") or 0),
-            })
+    for site_item in raw_items:
+        for unit_item in site_item.get("items", []):
+            unit_id = str(unit_item.get("unitId", ""))
+            if not unit_id:
+                continue
 
-        # Shape 2: buckets list
-        elif "buckets" in item:
-            for b in item["buckets"]:
-                t = b.get("time", "")
-                rows.append({"unit_id": unit_id, "bucket_time": t, "data_type": "FeedAmount", "value": float(b.get("FeedAmount") or 0)})
-                rows.append({"unit_id": unit_id, "bucket_time": t, "data_type": "Intensity",  "value": float(b.get("Intensity")  or 0)})
+            for type_item in unit_item.get("items", []):
+                data_type = type_item.get("type", "")
 
-        # Shape 3: combined per bucket
-        elif "FeedAmount" in item or "feedAmount" in item:
-            t = item.get("time", "")
-            rows.append({"unit_id": unit_id, "bucket_time": t, "data_type": "FeedAmount", "value": float(item.get("FeedAmount") or item.get("feedAmount") or 0)})
-            rows.append({"unit_id": unit_id, "bucket_time": t, "data_type": "Intensity",  "value": float(item.get("Intensity")  or item.get("intensity")  or 0)})
+                for bucket in type_item.get("items", []):
+                    val = bucket.get("averageValue") or bucket.get("sum") or 0
+                    val = float(val)
 
-        else:
-            logger.warning(f"Unknown item shape, keys: {list(item.keys())}, sample: {str(item)[:200]}")
+                    # ScaleAQ returns FeedAmount in grams — convert to kg
+                    if data_type == "FeedAmount" and bucket.get("measurement") == "g":
+                        val = val / 1000.0
 
+                    rows.append({
+                        "unit_id":     unit_id,
+                        "bucket_time": bucket.get("dateTime", ""),
+                        "data_type":   data_type,
+                        "value":       val,
+                    })
+
+    logger.info(f"Parsed {len(rows)} rows from {len(raw_items)} site items")
     return rows
 
 
@@ -142,15 +141,14 @@ async def rebuild_daily(db: aiosqlite.Connection, unit_ids: list[str], since: st
 
 
 async def sync_feed_data():
-    client  = get_scaleaq_client()
-    now     = utc_now()
-    from_dt = now - timedelta(days=LOOKBACK_DAYS)
+    client   = get_scaleaq_client()
+    now      = utc_now()
+    from_dt  = now - timedelta(days=LOOKBACK_DAYS)
     from_str = iso(from_dt)
     to_str   = iso(now)
 
     logger.info(f"Syncing ScaleAQ feed data {from_str} → {to_str}")
 
-    # Hent unit-IDer fra DB
     async with aiosqlite.connect(DB_PATH) as db:
         unit_ids = await get_unit_ids(db)
 
@@ -158,7 +156,7 @@ async def sync_feed_data():
         logger.warning("No units in DB – run /api/meta/sync-meta first")
         return
 
-    logger.info(f"Fetching data for {len(unit_ids)} units: {unit_ids}")
+    logger.info(f"Fetching data for {len(unit_ids)} units")
 
     try:
         raw = await client.get_feed_aggregate(
@@ -174,10 +172,7 @@ async def sync_feed_data():
         logger.warning("ScaleAQ returned no data")
         return
 
-    # Log first item so we can see the shape
-    logger.info(f"First item from ScaleAQ: {str(raw[0])[:300]}")
-
-    rows     = parse_aggregate_rows(raw)
+    rows = parse_aggregate_rows(raw)
     unit_ids_with_data = list({r["unit_id"] for r in rows})
 
     async with aiosqlite.connect(DB_PATH) as db:
