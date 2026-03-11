@@ -124,3 +124,23 @@ async def trigger_backfill(background_tasks: BackgroundTasks, days: int = 40):
     from sync import sync_feed_data_from
     background_tasks.add_task(sync_feed_data_from, days)
     return {"status": "backfill started", "days": days}
+
+@router.post("/reset-daily")
+async def reset_daily():
+    import aiosqlite
+    from db import DB_PATH
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute("DELETE FROM feed_daily")
+        await db.commit()
+    return {"status": "feed_daily slettet — kjør /backfill nå"}
+```
+
+**2.** Commit → Railway deployer automatisk (venter ~1 min)
+
+**3.** Gå til Swagger: `https://cermaq-backend-production.up.railway.app/docs`
+- Kall `POST /api/meta/reset-daily`
+- Kall `POST /api/meta/backfill?days=40`
+
+**4.** Sjekk resultatet:
+```
+https://cermaq-backend-production.up.railway.app/api/feed/daily/116108?from_date=2026-03-10&to_date=2026-03-11
