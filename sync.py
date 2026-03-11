@@ -33,6 +33,9 @@ def parse_aggregate_rows(raw_items: list[dict]) -> list[dict]:
     """
     ScaleAQ nested structure:
     [ { siteId, items: [ { unitId, items: [ { type, items: [ { dateTime, averageValue, measurement } ] } ] } ] } ]
+
+    NB: FeedAmount er kumulativ (akkumulert siden oppstart av fôringsøkt).
+    Vi lagrer råverdiene og beregner daglig total som MAX(feed_kg) per dag i rebuild_daily.
     """
     rows = []
 
@@ -49,7 +52,7 @@ def parse_aggregate_rows(raw_items: list[dict]) -> list[dict]:
                     val = bucket.get("averageValue") or bucket.get("sum") or 0
                     val = float(val)
 
-                    # ScaleAQ returns FeedAmount in grams — convert to kg
+                    # ScaleAQ returnerer FeedAmount i gram — konverter til kg
                     if data_type == "FeedAmount" and bucket.get("measurement") == "g":
                         val = val / 1000.0
 
@@ -91,13 +94,19 @@ async def upsert_10min(db: aiosqlite.Connection, rows: list[dict]):
 
 
 async def rebuild_hourly(db: aiosqlite.Connection, unit_ids: list[str], since: str):
+    """
+    Timesprofil: for hver time, ta MAX(feed_kg) som representerer toppen av
+    den kumulative kurven i den timen — dvs. total fôret frem til slutten av timen.
+    For å få kg PER time bruker vi MAX i timen minus MAX i forrige time.
+    Her lagrer vi MAX per time som et mellomsteg; dashboard bruker dette til timesprofil.
+    """
     for uid in unit_ids:
         await db.execute(
             """
             INSERT INTO feed_hourly (unit_id, hour_time, feed_kg, intensity_avg)
             SELECT unit_id,
                    strftime('%Y-%m-%dT%H:00:00Z', bucket_time) AS hour_time,
-                   SUM(COALESCE(feed_kg, 0)),
+                   MAX(COALESCE(feed_kg, 0)),
                    AVG(COALESCE(intensity, 0))
             FROM feed_10min
             WHERE unit_id = ? AND bucket_time >= ?
@@ -114,13 +123,17 @@ async def rebuild_hourly(db: aiosqlite.Connection, unit_ids: list[str], since: s
 
 
 async def rebuild_daily(db: aiosqlite.Connection, unit_ids: list[str], since: str):
+    """
+    Daglig total = MAX(feed_kg) per dag, siden FeedAmount er kumulativ.
+    Siste bucket på dagen har høyeste verdi = total fôret den dagen.
+    """
     for uid in unit_ids:
         await db.execute(
             """
             INSERT INTO feed_daily (unit_id, date, feed_kg, feed_sessions, first_feed, last_feed)
             SELECT unit_id,
                    substr(bucket_time, 1, 10) AS date,
-                   SUM(COALESCE(feed_kg, 0)),
+                   MAX(COALESCE(feed_kg, 0)),
                    COUNT(CASE WHEN feed_kg > 0 THEN 1 END),
                    MIN(bucket_time),
                    MAX(bucket_time)
@@ -155,8 +168,6 @@ async def sync_feed_data():
     if not unit_ids:
         logger.warning("No units in DB – run /api/meta/sync-meta first")
         return
-
-    logger.info(f"Fetching data for {len(unit_ids)} units")
 
     try:
         raw = await client.get_feed_aggregate(
