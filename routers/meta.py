@@ -15,7 +15,6 @@ router = APIRouter()
 
 @router.get("/sites")
 async def list_sites():
-    """Return all known sites."""
     async with aiosqlite.connect(DB_PATH) as db:
         db.row_factory = aiosqlite.Row
         cur = await db.execute("SELECT * FROM sites ORDER BY name")
@@ -25,7 +24,6 @@ async def list_sites():
 
 @router.get("/units")
 async def list_units(site_id: str | None = None):
-    """Return all units, optionally filtered by site."""
     async with aiosqlite.connect(DB_PATH) as db:
         db.row_factory = aiosqlite.Row
         if site_id:
@@ -42,26 +40,62 @@ async def list_units(site_id: str | None = None):
 async def sync_meta():
     """
     Fetch company meta from ScaleAQ and populate sites + units tables.
-    Run once after deploy to seed the DB with unit IDs.
+    Returns raw response if structure is unexpected.
     """
     client = get_scaleaq_client()
     data   = await client.get_company_meta()
 
-    # ScaleAQ meta structure: { sites: [ { id, name, units: [{id, name}] } ] }
-    sites = data.get("sites", data.get("data", {}).get("sites", []))
+    # Log full response so we can see structure
+    logger.info(f"ScaleAQ meta type: {type(data)}")
+    logger.info(f"ScaleAQ meta (500 chars): {str(data)[:500]}")
+
+    # Try all known response shapes
+    sites = []
+    if isinstance(data, list):
+        sites = data
+    elif isinstance(data, dict):
+        for key in ["sites", "localities", "companies", "units"]:
+            if data.get(key):
+                sites = data[key]
+                break
+        if not sites and data.get("data"):
+            inner = data["data"]
+            for key in ["sites", "localities", "companies"]:
+                if isinstance(inner, dict) and inner.get(key):
+                    sites = inner[key]
+                    break
+            if not sites and isinstance(inner, list):
+                sites = inner
+
+    if not sites:
+        # Return raw so we can inspect
+        return {
+            "error": "Could not find sites in response",
+            "response_type": str(type(data)),
+            "response_keys": list(data.keys()) if isinstance(data, dict) else None,
+            "raw": str(data)[:2000],
+        }
 
     async with aiosqlite.connect(DB_PATH) as db:
         for site in sites:
-            sid  = str(site.get("id",   site.get("siteId",   "")))
-            sname = site.get("name", site.get("siteName", sid))
+            sid   = str(site.get("id") or site.get("siteId") or site.get("localityId") or "")
+            sname = site.get("name") or site.get("siteName") or site.get("localityName") or sid
+            if not sid:
+                continue
             await db.execute(
                 "INSERT INTO sites(site_id, name) VALUES(?,?) "
                 "ON CONFLICT(site_id) DO UPDATE SET name=excluded.name",
                 (sid, sname),
             )
-            for unit in site.get("units", []):
-                uid   = str(unit.get("id",   unit.get("unitId",   "")))
-                uname = unit.get("name", unit.get("unitName", uid))
+            for key in ["units", "pens", "cages", "merds"]:
+                units = site.get(key, [])
+                if units:
+                    break
+            for unit in units:
+                uid   = str(unit.get("id") or unit.get("unitId") or unit.get("penId") or "")
+                uname = unit.get("name") or unit.get("unitName") or unit.get("penName") or uid
+                if not uid:
+                    continue
                 await db.execute(
                     "INSERT INTO units(unit_id, site_id, name) VALUES(?,?,?) "
                     "ON CONFLICT(unit_id) DO UPDATE SET name=excluded.name",
@@ -69,11 +103,24 @@ async def sync_meta():
                 )
         await db.commit()
 
-    return {"synced_sites": len(sites)}
+    return {
+        "synced_sites": len(sites),
+        "site_names": [
+            s.get("name") or s.get("siteName") or s.get("localityName", "")
+            for s in sites
+        ],
+    }
 
 
 @router.post("/sync-now")
 async def trigger_sync(background_tasks: BackgroundTasks):
-    """Manually trigger a feed data sync (runs in background)."""
     background_tasks.add_task(sync_feed_data)
     return {"status": "sync started"}
+
+
+@router.post("/backfill")
+async def trigger_backfill(background_tasks: BackgroundTasks, days: int = 40):
+    """Hent historiske data fra ScaleAQ for angitt antall dager tilbake."""
+    from sync import sync_feed_data_from
+    background_tasks.add_task(sync_feed_data_from, days)
+    return {"status": "backfill started", "days": days}
