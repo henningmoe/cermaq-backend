@@ -182,3 +182,46 @@ async def sync_feed_data():
         await rebuild_daily(db, unit_ids_with_data, from_str)
 
     logger.info(f"Sync complete – {len(rows)} rows, {len(unit_ids_with_data)} units")
+
+
+async def sync_feed_data_from(days: int = 40):
+    """Backfill: hent data fra ScaleAQ fra `days` dager tilbake til nå."""
+    client   = get_scaleaq_client()
+    now      = utc_now()
+    from_dt  = now - timedelta(days=days)
+    from_str = iso(from_dt)
+    to_str   = iso(now)
+
+    logger.info(f"Backfill: fetching ScaleAQ data {from_str} → {to_str} ({days} days)")
+
+    async with aiosqlite.connect(DB_PATH) as db:
+        unit_ids = await get_unit_ids(db)
+
+    if not unit_ids:
+        logger.warning("No units in DB – run /api/meta/sync-meta first")
+        return
+
+    try:
+        raw = await client.get_feed_aggregate(
+            from_time=from_str,
+            to_time=to_str,
+            unit_ids=unit_ids,
+        )
+    except Exception as e:
+        logger.error(f"ScaleAQ backfill fetch failed: {e}")
+        return
+
+    if not raw:
+        logger.warning("ScaleAQ returned no data for backfill")
+        return
+
+    rows = parse_aggregate_rows(raw)
+    unit_ids_with_data = list({r["unit_id"] for r in rows})
+
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        await upsert_10min(db, rows)
+        await rebuild_hourly(db, unit_ids_with_data, from_str)
+        await rebuild_daily(db, unit_ids_with_data, from_str)
+
+    logger.info(f"Backfill complete – {len(rows)} rows, {len(unit_ids_with_data)} units, {days} days")
